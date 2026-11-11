@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CSC AGN sky</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0d12; color: #e6e9ef;
+               font: 14px system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 12px; }
+  #sky { flex: 1; min-height: 0; }
+  button, input[type=text] { background: #1c2230; color: inherit; border: 1px solid #2f3a52;
+           border-radius: 6px; padding: 6px 12px; font: inherit; }
+  button { cursor: pointer; }
+  button:hover { background: #26304a; }
+  button:focus-visible, input:focus-visible { outline: 2px solid #7aa7ff; outline-offset: 2px; }
+  .flag { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  #info { border-top: 1px solid #2b3342; padding: 10px 14px; max-height: 30vh; overflow: auto; color: #98a2b3; }
+  #info .title { color: #e6e9ef; font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+  #info dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0; }
+  #info dt { color: #98a2b3; }
+  #info dd { margin: 0; color: #e6e9ef; word-break: break-word; }
+  #info .chip { display: inline-flex; align-items: center; gap: 5px; margin-right: 10px; }
+  #info .chip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  #info .head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  #status { color: #98a2b3; }
+  #status.err { color: #ff8a80; }
+</style>
+</head>
+<body>
+<div id="sky"></div>
+<div id="info" aria-live="polite">Click a source to see its details here.</div>
+<div class="bar">
+  <button id="whole">Whole sky</button>
+  <input type="text" id="find" list="names" size="42"
+         placeholder="Name, or coordinates: 10.68 41.27  or  00:42:44.3 +41:16:09">
+  <datalist id="names"></datalist>
+  <label>Zoom to <input type="text" id="fov" value="60" size="5"> arcsec</label>
+  <span id="status">Loading data...</span>
+</div>
+<div class="bar" id="flags">
+  <span>Overplot:</span>
+  <label class="flag"><input type="checkbox" id="chk-all" checked>
+    <span class="swatch" style="background:#8a71c6"></span>All sources</label>
+  <label class="flag"><input type="checkbox" id="chk-IR_AGN_wedge">
+    <span class="swatch" style="background:#8f1f08"></span>IR AGN (wedge) <span id="n-IR_AGN_wedge"></span></label>
+  <label class="flag"><input type="checkbox" id="chk-IR_AGN_line">
+    <span class="swatch" style="background:#dd9505"></span>IR AGN (line) <span id="n-IR_AGN_line"></span></label>
+  <label class="flag"><input type="checkbox" id="chk-Xray_AGN">
+    <span class="swatch" style="background:#6f00ff"></span>X-ray AGN <span id="n-Xray_AGN"></span></label>
+</div>
+
+<script type="module">
+  const $ = id => document.getElementById(id);
+  const status = (t, err) => { $('status').textContent = t; $('status').className = err ? 'err' : ''; };
+
+  const URLS = [
+    'https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.js',
+    'https://cdn.jsdelivr.net/npm/aladin-lite@3.7.3-beta/dist/aladin.js'
+  ];
+
+  async function getAladin() {
+    for (const url of URLS) {
+      try { const m = await import(url); const lib = m.default || window.A; if (lib) return lib; }
+      catch (e) { console.warn('Failed to import', url, e); }
+    }
+    return null;
+  }
+
+  const A = await getAladin();
+  if (!A) { status('Could not load Aladin Lite. See the console for details.', true); throw new Error('Aladin failed to load'); }
+  window.A = A;
+  await A.init;
+
+  const aladin = A.aladin('#sky', {
+    survey: 'P/DSS2/color', projection: 'AIT', target: '0 +0', fov: 360,
+    showReticle: false, showFullscreenControl: false, showGotoControl: false, showSimbadPointerControl: false
+  });
+
+  function zoomTo(ra, dec, fov) {
+    if (typeof aladin.animateToRaDecFoV === 'function') aladin.animateToRaDecFoV(ra, dec, fov, 1.5);
+    else { aladin.gotoRaDec(ra, dec); aladin.setFoV(fov); }
+  }
+
+  /* ---------- coordinate parsing ---------- */
+
+  // "41.27", "+41:16:09", "41 16 09", "41d16m09s" -> { value, sexagesimal }
+  function parseAngle(str) {
+    const s = str.trim().replace(/[hdms°'"′″:]/gi, ' ').replace(/\s+/g, ' ').trim();
+    const parts = s.split(' ');
+    if (!s || parts.length > 3 || parts.some(p => isNaN(Number(p)))) return null;
+    const neg = /^-/.test(parts[0]);
+    const n = parts.map(Number);
+    const v = Math.abs(n[0]) + (n[1] || 0) / 60 + (n[2] || 0) / 3600;
+    return { value: neg ? -v : v, sexagesimal: parts.length > 1 };
+  }
+
+  // Accepts "ra dec" or "ra, dec"; decimal = degrees, sexagesimal RA = hours
+  function parseCoords(text) {
+    text = text.trim();
+    let raStr, decStr;
+    if (text.includes(',')) {
+      const p = text.split(',').map(x => x.trim());
+      if (p.length !== 2) return null;
+      [raStr, decStr] = p;
+    } else {
+      const t = text.split(/\s+/);
+      if (t.length === 2) [raStr, decStr] = t;
+      else if (t.length === 6) { raStr = t.slice(0, 3).join(' '); decStr = t.slice(3).join(' '); }
+      else if (t.length === 4) { raStr = t.slice(0, 2).join(' '); decStr = t.slice(2).join(' '); }
+      else return null;
+    }
+    const ra = parseAngle(raStr), dec = parseAngle(decStr);
+    if (!ra || !dec) return null;
+    const hasHoursMarker = /[h:]/i.test(raStr);
+    const raDeg = (ra.sexagesimal || hasHoursMarker) ? ra.value * 15 : ra.value;
+    if (raDeg < 0 || raDeg >= 360 || Math.abs(dec.value) > 90) return null;
+    return { ra: raDeg, dec: dec.value };
+  }
+
+  function separationDeg(ra1, dec1, ra2, dec2) {
+    const r = Math.PI / 180;
+    const c = Math.sin(dec1 * r) * Math.sin(dec2 * r) +
+              Math.cos(dec1 * r) * Math.cos(dec2 * r) * Math.cos((ra1 - ra2) * r);
+    return Math.acos(Math.min(1, Math.max(-1, c))) / r;
+  }
+
+  const fmtSep = deg => deg * 3600 < 120 ? (deg * 3600).toFixed(1) + '"'
+                      : deg * 60 < 120 ? (deg * 60).toFixed(2) + "'"
+                      : deg.toFixed(3) + ' deg';
+
+  /* ---------- info panel (under the map) ---------- */
+
+  const fmtRA = d => { const h = d / 15, H = Math.floor(h), M = Math.floor((h - H) * 60), S = ((h - H) * 60 - M) * 60;
+    return String(H).padStart(2, '0') + ':' + String(M).padStart(2, '0') + ':' + S.toFixed(2).padStart(5, '0'); };
+  const fmtDec = d => { const a = Math.abs(d), D = Math.floor(a), M = Math.floor((a - D) * 60), S = ((a - D) * 60 - M) * 60;
+    return (d < 0 ? '-' : '+') + String(D).padStart(2, '0') + ':' + String(M).padStart(2, '0') + ':' + S.toFixed(1).padStart(4, '0'); };
+
+  function h(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  const SKIP = new Set(['name', 'RA', 'DEC', ...['IR_AGN_wedge', 'IR_AGN_line', 'Xray_AGN']]);
+
+  function showInfo(rec) {
+    const box = $('info');
+    box.replaceChildren();
+
+    const head = h('div', 'head');
+    head.append(h('div', 'title', rec.name));
+    const zoom = h('button', null, 'Zoom here');
+    zoom.onclick = () => zoomTo(rec.ra, rec.dec, (Number($('fov').value) || 60) / 3600);
+    head.append(zoom);
+    const full = h('a', null, 'Full details');
+    full.href = '/source/' + encodeURIComponent(rec.name);
+    full.target = '_top';          // open in the whole window, even when this viewer is embedded
+    full.style.color = '#8a71c6';
+    head.append(full);
+    box.append(head);
+
+    const dl = h('dl');
+    const row = (k, v) => { dl.append(h('dt', null, k), h('dd', null, v)); };
+    row('RA', rec.ra.toFixed(5) + '°  (' + fmtRA(rec.ra) + ')');
+    row('Dec', rec.dec.toFixed(5) + '°  (' + fmtDec(rec.dec) + ')');
+
+    const flagDd = h('dd');
+    if (rec.flagKeys.length) {
+      for (const k of rec.flagKeys) {
+        const chip = h('span', 'chip');
+        const dot = h('i'); dot.style.background = FLAGS[k].color;
+        chip.append(dot, FLAGS[k].label);
+        flagDd.append(chip);
+      }
+    } else flagDd.textContent = 'None';
+    dl.append(h('dt', null, 'Flags'), flagDd);
+
+    for (const [k, v] of Object.entries(rec.extra)) row(k, v === null ? '' : String(v));
+    box.append(dl);
+  }
+
+  /* ---------- data ---------- */
+
+  const byName = new Map();
+  const all = [];
+
+  // flag columns from app.py, with how each is drawn (drawn after the base layer, so they sit on top)
+  const FLAGS = {
+    IR_AGN_wedge: { label: 'IR AGN (Mateos+2012)', color: '#ff9f1c', shape: 'circle', size: 9 },
+    IR_AGN_line:  { label: 'IR AGN (Assef+2013)',  color: '#2ec4b6', shape: 'circle', size: 9 },
+    Xray_AGN:     { label: 'X-ray AGN',            color: '#ff4d6d', shape: 'circle', size: 9 }
+  };
+  const layers = {};   // flag name -> Aladin catalog
+
+  // clicking a marker fills the panel under the map instead of opening Aladin's popup
+  function onSourceClick(src) {
+    const d = (src && src.data) || {};
+    const rec = all[Number(d.id)];
+    if (rec) showInfo(rec);
+  }
+
+  function setVisible(cat, on) {
+    try { on ? cat.show() : cat.hide(); }
+    catch (e) { console.warn('show/hide failed', e); }
+  }
+
+  try {
+    const res = await fetch('/api/data', { cache: 'no-store' });
+    if (!res.ok) throw new Error('Server returned ' + res.status);
+    const rows = await res.json();
+    console.log('rows from /api/data:', rows.length, rows[0]);
+
+    const base = A.catalog({ name: 'CSC AGN', sourceSize: 4, color: '#8A71C6', shape: 'circle', onClick: onSourceClick });
+    aladin.addCatalog(base);
+    layers.all = base;
+
+    const baseSources = [];
+    const flagSources = Object.fromEntries(Object.keys(FLAGS).map(k => [k, []]));
+    for (const r of rows) {
+      if (r.RA == null || r.DEC == null || r.name == null) continue;
+      const set = Object.keys(FLAGS).filter(k => r[k]);
+      const id = all.length;
+      const info = { name: r.name, id };
+
+      baseSources.push(A.source(r.RA, r.DEC, info));
+      for (const k of set) flagSources[k].push(A.source(r.RA, r.DEC, info));
+
+      const extra = {};
+      for (const [k, v] of Object.entries(r)) if (!SKIP.has(k)) extra[k] = v;
+      const rec = { name: r.name, ra: r.RA, dec: r.DEC, flags: set.map(k => FLAGS[k].label), flagKeys: set, extra };
+      all.push(rec);
+      const key = r.name.toLowerCase();
+      if (!byName.has(key)) byName.set(key, rec);
+    }
+    base.addSources(baseSources);
+
+    // one catalog per flag, added after the base layer so it is drawn on top
+    for (const [k, style] of Object.entries(FLAGS)) {
+      const cat = A.catalog({ name: style.label, sourceSize: style.size, color: style.color, shape: style.shape, onClick: onSourceClick });
+      aladin.addCatalog(cat);
+      cat.addSources(flagSources[k]);
+      setVisible(cat, false);
+      layers[k] = cat;
+      $('n-' + k).textContent = '(' + flagSources[k].length + ')';
+      $('chk-' + k).onchange = e => setVisible(cat, e.target.checked);
+    }
+    $('chk-all').onchange = e => setVisible(base, e.target.checked);
+
+    console.log('sources added:', baseSources.length,
+      Object.fromEntries(Object.keys(FLAGS).map(k => [k, flagSources[k].length])));
+    aladin.view?.requestRedraw?.();
+
+    const dl = $('names');
+    for (const s of byName.values()) {
+      if (dl.childElementCount >= 5000) break;
+      const o = document.createElement('option'); o.value = s.name; dl.appendChild(o);
+    }
+    status('Plotted ' + baseSources.length + ' sources.');
+  } catch (e) {
+    console.error(e);
+    status('Could not load /api/data: ' + e.message, true);
+  }
+
+  /* ---------- search ---------- */
+
+  function search(query) {
+    query = query.trim();
+    if (!query) return;
+    const fov = (Number($('fov').value) || 60) / 3600;   // arcsec -> degrees for Aladin
+
+    // 1. exact name match
+    const named = byName.get(query.toLowerCase());
+    if (named) { showInfo(named); zoomTo(named.ra, named.dec, fov); status(named.name + ' at RA ' + named.ra.toFixed(5) + ', Dec ' + named.dec.toFixed(5) + (named.flags.length ? '. Flags: ' + named.flags.join(', ') : '') + '.'); return; }
+
+    // 2. coordinates
+    const c = parseCoords(query);
+    if (c) {
+      zoomTo(c.ra, c.dec, fov);
+      let best = null, bestSep = Infinity;
+      for (const s of all) {
+        const d = separationDeg(c.ra, c.dec, s.ra, s.dec);
+        if (d < bestSep) { bestSep = d; best = s; }
+      }
+      const where = 'RA ' + c.ra.toFixed(5) + ', Dec ' + c.dec.toFixed(5);
+      status(best ? where + '. Nearest source: ' + best.name + ' (' + fmtSep(bestSep) + ' away).' : where + '.');
+      return;
+    }
+
+    status('No source called "' + query + '", and it is not a recognised coordinate pair.', true);
+  }
+
+  $('whole').onclick = () => zoomTo(0, 0, 360);
+
+  // /skyviewer?q=NAME or coordinates opens already searched (used by the source pages)
+  const initialQuery = new URLSearchParams(location.search).get('q');
+  if (initialQuery) { $('find').value = initialQuery; search(initialQuery); }
+  $('find').addEventListener('change', e => search(e.target.value));
+  $('find').addEventListener('keydown', e => { if (e.key === 'Enter') search(e.target.value); });
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% set active = 'home' %}
+
+{% block content %}
+<section class="viewer" aria-label="Sky viewer">
+  <iframe src="/skyviewer" title="Sky viewer"></iframe>
+</section>
+
+<main>
+  <h2 id="how">Header2</h2>
+  <p><strong>What do we want to put:</strong> on the <em> homepage?</em></p>
+  <p> Maybe we include a table with a breakdown of the catalog here? Like X number of sources? </p>
+</main>
+{% endblock %}

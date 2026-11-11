@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} | enhanced CSC {% endblock %}
+
+{% block head %}
+<style>
+  .back { display: inline-block; margin-bottom: 16px; font-size: 14px; }
+  h1.src { font-size: 24px; margin: 0 0 4px; word-break: break-word; }
+  .coords { color: var(--muted); margin: 0 0 14px; font-variant-numeric: tabular-nums; }
+  .chips { margin: 0 0 16px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+          border: 1px solid var(--line); border-radius: 999px; font-size: 13px; }
+  .chip i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .chip.off { color: var(--muted); }
+  .chip.off i { background: transparent !important; border: 1px solid var(--muted); }
+  #cutout { height: 340px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin: 8px 0 16px; }
+  .links { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 8px; font-size: 14px; }
+  table.cols { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.cols th, table.cols td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+  table.cols th { color: var(--muted); font-weight: 500; width: 40%; }
+  table.cols td { font-variant-numeric: tabular-nums; word-break: break-word; }
+  #cutout-err { color: #ff8a80; font-size: 13px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<main>
+  <a class="back" href="/">&larr; Back to the sky viewer</a>
+
+  <h1 class="src">{{ name }}</h1>
+  <p class="coords">
+    RA {{ '%.5f' % ra }}&deg; ({{ ra_hms }}) &nbsp; Dec {{ '%.5f' % dec }}&deg; ({{ dec_dms }})
+  </p>
+
+  <div class="chips">
+    {% for f in flags %}
+      <span class="chip{% if not f.set %} off{% endif %}">
+        <i style="background: {{ f.color }}"></i>{{ f.label }}{% if not f.set %}: no{% endif %}
+      </span>
+    {% endfor %}
+  </div>
+
+  <div id="cutout" aria-label="Sky image around {{ name }}"></div>
+  <p id="cutout-err"></p>
+
+  <div class="links">
+    <a href="/skyviewer?q={{ name | urlencode }}">Show on the full sky map</a>
+    <a href="https://simbad.cds.unistra.fr/simbad/sim-coo?Coord={{ '%.6f' % ra }}+{{ '%+.6f' % dec }}&amp;Radius=10&amp;Radius.unit=arcsec"
+       target="_blank" rel="noopener">Search SIMBAD</a>
+    <a href="https://aladin.cds.unistra.fr/AladinLite/?target={{ '%.6f' % ra }}+{{ '%+.6f' % dec }}&amp;fov=0.05"
+       target="_blank" rel="noopener">Open in Aladin Lite</a>
+  </div>
+
+  <h2>All catalogue columns</h2>
+  <table class="cols">
+    {% for col, value in columns %}
+      <tr><th scope="row">{{ col }}</th><td>{{ value }}</td></tr>
+    {% endfor %}
+  </table>
+</main>
+
+<script type="module">
+  const RA = {{ ra }};
+  const DEC = {{ dec }};
+
+  const URLS = [
+    'https://aladin.cds.unistra.fr/AladinLite/api/v3/latest/aladin.js',
+    'https://cdn.jsdelivr.net/npm/aladin-lite@3.7.3-beta/dist/aladin.js'
+  ];
+
+  async function getAladin() {
+    for (const url of URLS) {
+      try { const m = await import(url); const lib = m.default || window.A; if (lib) return lib; }
+      catch (e) { console.warn('Failed to import', url, e); }
+    }
+    return null;
+  }
+
+  const A = await getAladin();
+  if (!A) {
+    document.getElementById('cutout-err').textContent = 'Could not load the sky image.';
+  } else {
+    await A.init;
+    const aladin = A.aladin('#cutout', {
+      survey: 'P/DSS2/color', target: RA + ' ' + DEC, fov: 0.03,
+      showReticle: false, showFullscreenControl: false, showGotoControl: false, showSimbadPointerControl: false
+    });
+    const cat = A.catalog({ name: 'Source', sourceSize: 22, color: '#8a71c6', shape: 'circle' });
+    aladin.addCatalog(cat);
+    cat.addSources([A.source(RA, DEC, {})]);
+  }
+</script>
+{% endblock %}
